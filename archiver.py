@@ -8,22 +8,45 @@ import mwparserfromhell
 API = "https://test.wikipedia.org/w/api.php"
 session = requests.Session()
 
-USERNAME = os.environ["BOT_USER"]
-PASSWORD = os.environ["BOT_PASS"]
-
 session.headers.update({
     "User-Agent": "AutoarchiveBot/1.0"
 })
 
+USERNAME = os.environ["BOT_USER"]
+PASSWORD = os.environ["BOT_PASS"]
+
+def safe_get(params, retries=3):
+    for i in range(retries):
+        r = session.get(API, params=params)
+
+        try:
+            data = r.json()
+        except Exception:
+            print("Bad JSON, retry", i + 1)
+            print(r.text[:200])
+            time.sleep(2 * (i + 1))
+            continue
+
+        if "error" in data:
+            print("API error:", data["error"])
+            time.sleep(2 * (i + 1))
+            continue
+
+        return data
+
+    raise Exception("API request failed after retries")
+
 def login():
-    token = session.get(API, params={
+    data = safe_get({
         "action": "query",
         "meta": "tokens",
         "type": "login",
         "format": "json"
-    }).json()["query"]["tokens"]["logintoken"]
+    })
 
-    session.post(API, data={
+    token = data["query"]["tokens"]["logintoken"]
+
+    r = session.post(API, data={
         "action": "login",
         "lgname": USERNAME,
         "lgpassword": PASSWORD,
@@ -31,39 +54,50 @@ def login():
         "format": "json"
     })
 
+    result = r.json().get("login", {}).get("result")
+
+    if result != "Success":
+        raise Exception(f"Login failed: {r.text[:200]}")
 
 def get_watchlist():
-    r = session.get(API, params={
+    r = safe_get({
         "action": "query",
         "list": "watchlistraw",
         "wrlimit": "max",
         "format": "json"
-    }).json()
+    })
 
-    return [p["title"] for p in r["query"]["watchlistraw"]]
+    if "query" not in r:
+        raise Exception(f"Unexpected watchlist response: {r}")
 
+    return [p["title"] for p in r["query"].get("watchlistraw", [])]
 
 def get_page(title):
-    r = session.get(API, params={
+    r = safe_get({
         "action": "query",
         "prop": "revisions",
         "rvprop": "content",
         "titles": title,
         "format": "json"
-    }).json()
+    })
 
     pages = r["query"]["pages"]
     return next(iter(pages.values()))["revisions"][0]["*"]
 
 
-def edit_page(title, text, summary):
-    token = session.get(API, params={
+def get_csrf():
+    r = safe_get({
         "action": "query",
         "meta": "tokens",
         "format": "json"
-    }).json()["query"]["tokens"]["csrftoken"]
+    })
+    return r["query"]["tokens"]["csrftoken"]
 
-    session.post(API, data={
+
+def edit_page(title, text, summary):
+    token = get_csrf()
+
+    r = session.post(API, data={
         "action": "edit",
         "title": title,
         "text": text,
@@ -71,6 +105,8 @@ def edit_page(title, text, summary):
         "token": token,
         "format": "json"
     })
+
+    print("Edit:", title, r.text[:200])
 
 def parse_ago(value):
     m = re.match(r"^\s*(\d+)\s*([mdhw])\s*$", value.lower())
@@ -80,21 +116,12 @@ def parse_ago(value):
     n = int(m.group(1))
     unit = m.group(2)
 
-    return n * {
-        "m": 1/60,
-        "h": 1,
-        "d": 24,
-        "w": 168
-    }[unit]
+    return n * {"m":1/60,"h":1,"d":24,"w":168}[unit]
 
 
 def resolve(pattern, title):
     now = datetime.datetime.utcnow()
-    return (
-        pattern
-        .replace("%(fullpage)", title)
-        .replace("%(year)", str(now.year))
-    )
+    return pattern.replace("%(fullpage)", title).replace("%(year)", str(now.year))
 
 def get_config(text):
     code = mwparserfromhell.parse(text)
@@ -119,7 +146,7 @@ def split_sections(text):
     return lead, sections
 
 def has_marker(section_text):
-    return bool(re.search(r'discussion-archived', section_text, re.I))
+    return bool(re.search(r"discussion-archived", section_text, re.I))
 
 TIMESTAMP = r"\d{2}:\d{2}, \d{1,2} \w+ \d{4}"
 
