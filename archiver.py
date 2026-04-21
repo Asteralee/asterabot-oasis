@@ -11,6 +11,9 @@ session = requests.Session()
 USERNAME = os.environ["BOT_USER"]
 PASSWORD = os.environ["BOT_PASS"]
 
+session.headers.update({
+    "User-Agent": "AutoarchiveBot/1.0"
+})
 
 def login():
     token = session.get(API, params={
