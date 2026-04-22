@@ -9,11 +9,16 @@ API = "https://test.wikipedia.org/w/api.php"
 session = requests.Session()
 
 session.headers.update({
-    "User-Agent": "AutoarchiveBot/1.0"
+    "User-Agent": "AutoarchiveBot/1.0 (test.wikipedia.org; bot)"
 })
 
 USERNAME = os.environ["BOT_USER"]
 PASSWORD = os.environ["BOT_PASS"]
+
+
+# -----------------------------
+# SAFE API
+# -----------------------------
 
 def safe_get(params, retries=3):
     for i in range(retries):
@@ -23,7 +28,6 @@ def safe_get(params, retries=3):
             data = r.json()
         except Exception:
             print("Bad JSON retry", i + 1)
-            print(r.text[:200])
             time.sleep(2 * (i + 1))
             continue
 
@@ -35,6 +39,11 @@ def safe_get(params, retries=3):
         return data
 
     raise Exception("API request failed")
+
+
+# -----------------------------
+# LOGIN
+# -----------------------------
 
 def login():
     data = safe_get({
@@ -54,9 +63,13 @@ def login():
         "format": "json"
     })
 
-    result = r.json().get("login", {}).get("result")
-    if result != "Success":
-        raise Exception(f"Login failed: {r.text[:200]}")
+    if r.json().get("login", {}).get("result") != "Success":
+        raise Exception("Login failed")
+
+
+# -----------------------------
+# WATCHLIST
+# -----------------------------
 
 def get_watchlist():
     r = safe_get({
@@ -66,13 +79,18 @@ def get_watchlist():
         "format": "json"
     })
 
-    if "query" in r and "watchlistraw" in r["query"]:
-        return [p["title"] for p in r["query"]["watchlistraw"]]
+    if "query" in r:
+        return [p["title"] for p in r["query"].get("watchlistraw", [])]
 
     if "watchlistraw" in r:
         return [p["title"] for p in r["watchlistraw"]]
 
     return []
+
+
+# -----------------------------
+# PAGE I/O
+# -----------------------------
 
 def get_page(title):
     r = safe_get({
@@ -108,12 +126,17 @@ def edit_page(title, text, summary):
         "format": "json"
     })
 
-    print("Edit:", title, r.text[:200])
+    print("Edited:", title)
+
+
+# -----------------------------
+# CONFIG
+# -----------------------------
 
 def parse_ago(value):
     m = re.match(r"^\s*(\d+)\s*([mdhw])\s*$", value.lower())
     if not m:
-        return 999999  # fallback
+        return 999999
 
     n = int(m.group(1))
     unit = m.group(2)
@@ -142,17 +165,29 @@ def resolve(pattern, title):
     )
 
 
-def extract_archive_blocks(text):
-    pattern = re.compile(
-        r'(<div class="boilerplate metadata discussion-archived".*?</div>)',
-        re.S | re.I
-    )
-    return pattern.findall(text)
+# -----------------------------
+# SECTION PARSING (IMPORTANT FIX)
+# -----------------------------
+
+def split_sections(text):
+    parts = re.split(r"(==.*?==)", text)
+    lead = parts[0]
+
+    sections = []
+    for i in range(1, len(parts), 2):
+        heading = parts[i]
+        content = parts[i+1] if i+1 < len(parts) else ""
+        sections.append((heading, content))
+
+    return lead, sections
 
 
-def is_old_enough(block, hours):
-    # simple timestamp heuristic
-    ts = re.findall(r"\d{2}:\d{2}, \d{1,2} \w+ \d{4}", block)
+def has_archive_marker(text):
+    return "discussion-archived" in text.lower()
+
+
+def is_old_enough(text, hours):
+    ts = re.findall(r"\d{2}:\d{2}, \d{1,2} \w+ \d{4}", text)
 
     if not ts:
         return False
@@ -165,6 +200,10 @@ def is_old_enough(block, hours):
         return False
 
 
+# -----------------------------
+# CORE LOGIC
+# -----------------------------
+
 def process(title):
     text = get_page(title)
 
@@ -174,31 +213,38 @@ def process(title):
 
     archive_title = resolve(pattern, title)
 
-    blocks = extract_archive_blocks(text)
+    lead, sections = split_sections(text)
 
-    if not blocks:
+    keep = []
+    archive = []
+
+    for heading, content in sections:
+        full = heading + content
+
+        if has_archive_marker(full) and is_old_enough(full, hours):
+            archive.append(full)
+        else:
+            keep.append(full)
+
+    if not archive:
         return
 
-    keep = text
-    to_archive = []
-
-    for b in blocks:
-        if is_old_enough(b, hours):
-            to_archive.append(b)
-            keep = keep.replace(b, "")
-
-    if not to_archive:
-        return
+    new_main = lead + "".join(keep)
 
     try:
         archive_text = get_page(archive_title)
     except:
         archive_text = ""
 
-    archive_text += "\n\n" + "\n\n".join(to_archive)
+    archive_text += "\n\n" + "\n\n".join(archive)
 
     edit_page(archive_title, archive_text, "Bot: archiving discussions")
-    edit_page(title, keep, "Bot: removing archived sections")
+    edit_page(title, new_main, "Bot: removing archived sections")
+
+
+# -----------------------------
+# RUNNER
+# -----------------------------
 
 def run():
     login()
