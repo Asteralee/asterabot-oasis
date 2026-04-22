@@ -22,7 +22,7 @@ def safe_get(params, retries=3):
         try:
             data = r.json()
         except Exception:
-            print("Bad JSON, retry", i + 1)
+            print("Bad JSON retry", i + 1)
             print(r.text[:200])
             time.sleep(2 * (i + 1))
             continue
@@ -34,7 +34,7 @@ def safe_get(params, retries=3):
 
         return data
 
-    raise Exception("API request failed after retries")
+    raise Exception("API request failed")
 
 def login():
     data = safe_get({
@@ -55,7 +55,6 @@ def login():
     })
 
     result = r.json().get("login", {}).get("result")
-
     if result != "Success":
         raise Exception(f"Login failed: {r.text[:200]}")
 
@@ -73,7 +72,6 @@ def get_watchlist():
     if "watchlistraw" in r:
         return [p["title"] for p in r["watchlistraw"]]
 
-    print("Watchlist returned no usable data:", r)
     return []
 
 def get_page(title):
@@ -115,17 +113,13 @@ def edit_page(title, text, summary):
 def parse_ago(value):
     m = re.match(r"^\s*(\d+)\s*([mdhw])\s*$", value.lower())
     if not m:
-        raise ValueError(f"Invalid ago format: {value}")
+        return 999999  # fallback
 
     n = int(m.group(1))
     unit = m.group(2)
 
     return n * {"m":1/60,"h":1,"d":24,"w":168}[unit]
 
-
-def resolve(pattern, title):
-    now = datetime.datetime.utcnow()
-    return pattern.replace("%(fullpage)", title).replace("%(year)", str(now.year))
 
 def get_config(text):
     code = mwparserfromhell.parse(text)
@@ -138,43 +132,38 @@ def get_config(text):
 
     return None, None
 
-def split_sections(text):
-    parts = re.split(r"(==.*?==)", text)
-    lead = parts[0]
 
-    sections = [
-        (parts[i], parts[i+1] if i+1 < len(parts) else "")
-        for i in range(1, len(parts), 2)
-    ]
-
-    return lead, sections
-
-def has_marker(section_text):
-    return bool(re.search(r"discussion-archived", section_text, re.I))
-
-TIMESTAMP = r"\d{2}:\d{2}, \d{1,2} \w+ \d{4}"
+def resolve(pattern, title):
+    now = datetime.datetime.utcnow()
+    return (
+        pattern
+        .replace("%(fullpage)", title)
+        .replace("%(year)", str(now.year))
+    )
 
 
-def latest_ts(text):
-    matches = re.findall(TIMESTAMP, text)
-
-    ts = []
-    for m in matches:
-        try:
-            ts.append(datetime.datetime.strptime(m, "%H:%M, %d %B %Y"))
-        except:
-            pass
-
-    return max(ts).replace(tzinfo=datetime.timezone.utc) if ts else None
+def extract_archive_blocks(text):
+    pattern = re.compile(
+        r'(<div class="boilerplate metadata discussion-archived".*?</div>)',
+        re.S | re.I
+    )
+    return pattern.findall(text)
 
 
-def old_enough(text, hours):
-    ts = latest_ts(text)
+def is_old_enough(block, hours):
+    # simple timestamp heuristic
+    ts = re.findall(r"\d{2}:\d{2}, \d{1,2} \w+ \d{4}", block)
+
     if not ts:
         return False
 
-    now = datetime.datetime.now(datetime.timezone.utc)
-    return (now - ts).total_seconds() / 3600 >= hours
+    try:
+        last = datetime.datetime.strptime(ts[-1], "%H:%M, %d %B %Y")
+        age = (datetime.datetime.utcnow() - last).total_seconds() / 3600
+        return age >= hours
+    except:
+        return False
+
 
 def process(title):
     text = get_page(title)
@@ -185,32 +174,31 @@ def process(title):
 
     archive_title = resolve(pattern, title)
 
-    lead, sections = split_sections(text)
+    blocks = extract_archive_blocks(text)
 
-    keep, move = [], []
-
-    for h, b in sections:
-        full = h + b
-
-        if has_marker(full) and old_enough(full, hours):
-            move.append(full)
-        else:
-            keep.append(full)
-
-    if not move:
+    if not blocks:
         return
 
-    new_main = lead + "".join(keep)
+    keep = text
+    to_archive = []
+
+    for b in blocks:
+        if is_old_enough(b, hours):
+            to_archive.append(b)
+            keep = keep.replace(b, "")
+
+    if not to_archive:
+        return
 
     try:
         archive_text = get_page(archive_title)
     except:
         archive_text = ""
 
-    archive_text += "\n\n" + "\n\n".join(move)
+    archive_text += "\n\n" + "\n\n".join(to_archive)
 
-    edit_page(archive_title, archive_text, "Bot: archiving sections")
-    edit_page(title, new_main, "Bot: removing archived sections")
+    edit_page(archive_title, archive_text, "Bot: archiving discussions")
+    edit_page(title, keep, "Bot: removing archived sections")
 
 def run():
     login()
