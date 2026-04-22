@@ -67,10 +67,14 @@ def get_watchlist():
         "format": "json"
     })
 
-    if "query" not in r:
-        raise Exception(f"Unexpected watchlist response: {r}")
+    if "query" in r and "watchlistraw" in r["query"]:
+        return [p["title"] for p in r["query"]["watchlistraw"]]
 
-    return [p["title"] for p in r["query"].get("watchlistraw", [])]
+    if "watchlistraw" in r:
+        return [p["title"] for p in r["watchlistraw"]]
+
+    print("Watchlist returned no usable data:", r)
+    return []
 
 def get_page(title):
     r = safe_get({
